@@ -1,11 +1,13 @@
 import discord
 from discord.ext import commands
+from discord.ui import View, Button
 import os
 from dotenv import load_dotenv
 import requests
 from bs4 import BeautifulSoup
 import random
 from keep_alive import keep_alive
+from playwright.async_api import async_playwright
 import re
 
 load_dotenv()
@@ -256,6 +258,118 @@ def get_lp_value(rank_str):
         return int(lp_value) if lp_value else 0
     except ValueError:
         return 0
+
+Trait_Map = {
+    "난동꾼": "Bruiser",
+    "신성기업": "Divinicorp",
+    "선봉대": "Vanguard",
+    "기술광": "Techie",
+    "범죄 조직": "Syndicate",
+    "책략가": "Strategist",
+    "거리의 악마": "Street Demon",
+    "사이버보스": "Cyberboss",
+    "속사 포": "Rapidfire",
+    "영혼 살해자": "Soul Killer",
+    "다이나모": "Dynamo",
+    "황금 황소": "Golden Ox",
+    "요새": "Bastion",
+    "엑소테크": "Exotech",
+    "동물특공대": "Anima Squad",
+    "사격수": "Marksman",
+    "군주": "Overlord",
+    "학살자": "Slayer",
+    "처형자": "Executioner",
+    "네트워크의 신": "God of the Net",
+    "폭발 봇": "BoomBot",
+    "증.폭.": "A.M.P.",
+    "바이러스": "Virus",
+    "사이퍼": "Cipher"
+} 
+
+async def fetch_traits(summoner_name):
+    async with async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page()
+        url = f"https://lolchess.gg/profile/na/{summoner_name}/set14/statistics?staticType=traits"
+        await page.goto(url, timeout=60000)
+        await page.wait_for_selector('table.css-meomra')  # Wait for table to load
+
+        html = await page.content()
+        await browser.close()
+
+    soup = BeautifulSoup(html, 'html.parser')
+    table = soup.find('table', class_='css-meomra')
+    if not table:
+        print("No table found")
+        return []
+
+    rows = table.find('tbody').find_all('tr')
+    trait_data = []
+
+    for row in rows:
+        cols = row.find_all('td')
+        if len(cols) < 6:
+            continue
+
+        raw_trait = cols[0].text.strip()
+        trait_clean = re.sub(r'\d+$', '', raw_trait)
+
+        for kor, eng in Trait_Map.items():
+            if kor in trait_clean:
+                trait_clean = trait_clean.replace(kor, eng)
+                break
+
+        trait_data.append({
+            "trait": trait_clean,
+            "plays": int(cols[1].text.strip().replace(",", "")),
+            "win_rate": float(cols[2].text.strip().replace("%", "")),
+            "top4_rate": float(cols[3].text.strip().replace("%", "")),
+            "avg_rank": float(cols[4].text.strip().replace("#", ""))
+        })
+
+    print("Fetched traits:", trait_data)
+    return trait_data
+
+def build_embed(data, sort_by):
+    embed = discord.Embed(title=f"🧠 Trait Stats (Sorted by {sort_by})", color=0xFFD700)
+    for entry in data[:10]:  # Top 10
+        embed.add_field(
+            name=entry["trait"],
+            value=f"Plays: {entry['plays']}\n🏆 Win Rate: {entry['win_rate']}%\n🎯 Top 4 Rate: {entry['top4_rate']}%\n📊 Avg Rank: {entry['avg_rank']}",
+            inline=False
+        )
+    return embed
+
+class TraitSortView(View):
+    def __init__(self, data):
+        super().__init__(timeout=60)
+        self.data = data
+
+    @discord.ui.button(label="Plays", style=discord.ButtonStyle.primary)
+    async def sort_plays(self, interaction: discord.Interaction, button: Button):
+        sorted_data = sorted(self.data, key=lambda x: x['plays'], reverse=True)
+        embed = build_embed(sorted_data, "Plays")
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Win Rate", style=discord.ButtonStyle.success)
+    async def sort_winrate(self, interaction: discord.Interaction, button: Button):
+        sorted_data = sorted(self.data, key=lambda x: x['win_rate'], reverse=True)
+        embed = build_embed(sorted_data, "Win Rate")
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Avg Rank", style=discord.ButtonStyle.danger)
+    async def sort_avgrank(self, interaction: discord.Interaction, button: Button):
+        sorted_data = sorted(self.data, key=lambda x: x['avg_rank'])
+        embed = build_embed(sorted_data, "Avg Rank")
+        await interaction.response.edit_message(embed=embed, view=self)
+
+@bot.command()
+async def traits(ctx, *, summoner_name):
+    data = await fetch_traits(summoner_name.replace(' ', '%20'))
+    sorted_data = sorted(data, key=lambda x: x['plays'], reverse=True)
+    embed = build_embed(sorted_data, "Plays")
+    view = TraitSortView(data)
+    await ctx.send(embed=embed, view=view)
     
 @bot.command(name='delete')
 async def delete(ctx, *, player_name: str):
