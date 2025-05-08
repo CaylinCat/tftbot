@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 import random
 from keep_alive import keep_alive
 from playwright.async_api import async_playwright
+from tabulate import tabulate
 import re
 
 load_dotenv()
@@ -268,7 +269,7 @@ Trait_Map = {
     "책략가": "Strategist",
     "거리의 악마": "Street Demon",
     "사이버보스": "Cyberboss",
-    "속사 포": "Rapidfire",
+    "속사포": "Rapidfire",
     "영혼 살해자": "Soul Killer",
     "다이나모": "Dynamo",
     "황금 황소": "Golden Ox",
@@ -292,7 +293,7 @@ async def fetch_traits(summoner_name):
         page = await browser.new_page()
         url = f"https://lolchess.gg/profile/na/{summoner_name}/set14/statistics?staticType=traits"
         await page.goto(url, timeout=60000)
-        await page.wait_for_selector('table.css-meomra')  # Wait for table to load
+        await page.wait_for_selector('table.css-meomra')
 
         html = await page.content()
         await browser.close()
@@ -330,15 +331,38 @@ async def fetch_traits(summoner_name):
     print("Fetched traits:", trait_data)
     return trait_data
 
+# def build_embed(data, sort_by):
+#     embed = discord.Embed(title=f"🧠 Trait Stats (Sorted by {sort_by})", color=0xFFD700)
+#     for entry in data[:10]:  # Top 10
+#         embed.add_field(
+#             name=entry["trait"],
+#             value=f"Plays: {entry['plays']}\n🏆 Win Rate: {entry['win_rate']}%\n🎯 Top 4 Rate: {entry['top4_rate']}%\n📊 Avg Rank: {entry['avg_rank']}",
+#             inline=False
+#         )
+#     return embed
+
 def build_embed(data, sort_by):
-    embed = discord.Embed(title=f"🧠 Trait Stats (Sorted by {sort_by})", color=0xFFD700)
-    for entry in data[:10]:  # Top 10
-        embed.add_field(
-            name=entry["trait"],
-            value=f"Plays: {entry['plays']}\n🏆 Win Rate: {entry['win_rate']}%\n🎯 Top 4 Rate: {entry['top4_rate']}%\n📊 Avg Rank: {entry['avg_rank']}",
-            inline=False
-        )
+    embed = discord.Embed(
+        title=f"🧠 Trait Stats (Sorted by {sort_by})",
+        color=0xFFD700
+    )
+
+    table_lines = ["`{:<16} {:>7} {:>10} {:>13} {:>11}`".format(
+        "Trait", "Plays", "Win Rate🏆", "Top 4 Rate🎯", "Avg Rank✨"
+    )]
+
+    for entry in data[:10]:
+        table_lines.append("`{:<16} {:>5} {:>10} {:>13} {:>13}`".format(
+            entry["trait"][:16],  # truncate long trait names
+            entry["plays"],
+            f"{entry['win_rate']}%",
+            f"{entry['top4_rate']}%",
+            f"{entry['avg_rank']:.2f}"
+        ))
+
+    embed.description = "\n".join(table_lines)
     return embed
+
 
 class TraitSortView(View):
     def __init__(self, data):
@@ -347,27 +371,31 @@ class TraitSortView(View):
 
     @discord.ui.button(label="Plays", style=discord.ButtonStyle.primary)
     async def sort_plays(self, interaction: discord.Interaction, button: Button):
-        sorted_data = sorted(self.data, key=lambda x: x['plays'], reverse=True)
+        sorted_data = sorted(self.data, key=lambda x: x["plays"], reverse=True)
         embed = build_embed(sorted_data, "Plays")
         await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="Win Rate", style=discord.ButtonStyle.success)
     async def sort_winrate(self, interaction: discord.Interaction, button: Button):
-        sorted_data = sorted(self.data, key=lambda x: x['win_rate'], reverse=True)
+        sorted_data = sorted(self.data, key=lambda x: x["win_rate"], reverse=True)
         embed = build_embed(sorted_data, "Win Rate")
         await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="Avg Rank", style=discord.ButtonStyle.danger)
     async def sort_avgrank(self, interaction: discord.Interaction, button: Button):
-        sorted_data = sorted(self.data, key=lambda x: x['avg_rank'])
+        sorted_data = sorted(self.data, key=lambda x: x["avg_rank"], reverse=False)
         embed = build_embed(sorted_data, "Avg Rank")
         await interaction.response.edit_message(embed=embed, view=self)
 
 @bot.command()
 async def traits(ctx, *, summoner_name):
     data = await fetch_traits(summoner_name.replace(' ', '%20'))
-    sorted_data = sorted(data, key=lambda x: x['plays'], reverse=True)
-    embed = build_embed(sorted_data, "Plays")
+    if not data:
+        await ctx.send("❌ Couldn't fetch data. Make sure the summoner name is correct.")
+        return
+
+    sorted_data = sorted(data, key=lambda x: x["plays"], reverse=True)
+    embed = build_embed(sorted_data, sort_by="Plays")
     view = TraitSortView(data)
     await ctx.send(embed=embed, view=view)
     
