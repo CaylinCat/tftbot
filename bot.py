@@ -1,3 +1,4 @@
+import asyncio
 import discord
 from discord.ext import commands
 from discord.ui import View, Button
@@ -21,9 +22,16 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
 player_stats = {}
+playwright = None
+browser = None
 
 @bot.event
 async def on_ready():
+    global playwright, browser
+    if playwright is None:
+        playwright = await async_playwright().start()
+    if browser is None:
+        browser = await playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
     print(f'Logged in as {bot.user}')
 
 @bot.event
@@ -288,20 +296,55 @@ Trait_Map = {
 } 
 
 async def fetch_traits(summoner_name):
-    async with async_playwright() as p:
-        browser = await p.chromium.launch()
-        page = await browser.new_page()
-        url = f"https://lolchess.gg/profile/na/{summoner_name}/set14/statistics?staticType=traits"
-        await page.goto(url, timeout=60000)
-        await page.wait_for_selector('table.css-meomra')
+    global browser
+    context = await browser.new_context()
+    page = await context.new_page()
 
-        html = await page.content()
-        await browser.close()
+    await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "stylesheet", "font"] else route.continue_())
+
+    url = f"https://lolchess.gg/profile/na/{summoner_name}/set14/statistics?staticType=traits"
+    html = None
+
+    # Retry logic
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+            # Wait for at least one data row
+            await page.wait_for_selector("table.css-meomra tbody tr:nth-child(1)", timeout=30000)
+
+            # Optional: detect "no data" message
+            if await page.query_selector(".NoData"):
+                print(f"No data available for {summoner_name}")
+                await context.close()
+                return []
+
+            html = await page.content()
+            break  # Exit loop on success
+        except Exception as e:
+            print(f"Page load status on attempt {attempt + 1}: failed due to {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)  # 1s, 2s, 4s backoff
+            else:
+                print(f"Failed to fetch after {max_retries} attempts.")
+                await context.close()
+                return []
+
+    await context.close()
+
+    # Extra safeguard
+    if not html:
+        print("No HTML content retrieved.")
+        return []
+
+    with open("debug_traits.html", "w", encoding="utf-8") as f:
+        f.write(html)
 
     soup = BeautifulSoup(html, 'html.parser')
-    table = soup.find('table', class_='css-meomra')
+    table = soup.select_one('table.css-meomra')
     if not table:
-        print("No table found")
+        print("No table found in parsed HTML")
         return []
 
     rows = table.find('tbody').find_all('tr')
@@ -310,6 +353,7 @@ async def fetch_traits(summoner_name):
     for row in rows:
         cols = row.find_all('td')
         if len(cols) < 6:
+            print(f"Skipping incomplete row: {row}")
             continue
 
         raw_trait = cols[0].text.strip()
@@ -320,13 +364,17 @@ async def fetch_traits(summoner_name):
                 trait_clean = trait_clean.replace(kor, eng)
                 break
 
-        trait_data.append({
-            "trait": trait_clean,
-            "plays": int(cols[1].text.strip().replace(",", "")),
-            "win_rate": float(cols[2].text.strip().replace("%", "")),
-            "top4_rate": float(cols[3].text.strip().replace("%", "")),
-            "avg_rank": float(cols[4].text.strip().replace("#", ""))
-        })
+        try:
+            trait_data.append({
+                "trait": trait_clean,
+                "plays": int(cols[1].text.strip().replace(",", "")),
+                "win_rate": float(cols[2].text.strip().replace("%", "")),
+                "top4_rate": float(cols[3].text.strip().replace("%", "")),
+                "avg_rank": float(cols[4].text.strip().replace("#", ""))
+            })
+        except ValueError as e:
+            print(f"Error parsing row values: {e}")
+            continue
 
     print("Fetched traits:", trait_data)
     return trait_data
@@ -380,6 +428,12 @@ class TraitSortView(View):
         sorted_data = sorted(self.data, key=lambda x: x["win_rate"], reverse=True)
         embed = build_embed(sorted_data, "Win Rate")
         await interaction.response.edit_message(embed=embed, view=self)
+
+    # @discord.ui.button(label="Top 4 Rate", style=discord.ButtonStyle.secondary)
+    # async def sort_top4(self, interaction: discord.Interaction, button: Button):
+    #     sorted_data = sorted(self.data, key=lambda x: x["top4_rate"], reverse=True)
+    #     embed = build_embed(sorted_data, "Top 4 Rate")
+    #     await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="Avg Rank", style=discord.ButtonStyle.danger)
     async def sort_avgrank(self, interaction: discord.Interaction, button: Button):
