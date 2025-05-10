@@ -1,0 +1,46 @@
+{
+  "summonerSeasonDeckAvgStats": [],
+  "summonerSeasonOverviews": [
+    {
+        "season": "set14",
+        "summonerId": 7864266,
+        "queueId": 0,
+        "plays": 182,
+        "wins": 25,
+        "tops": 114,
+        "placements": [25, 38, 26, 27, 21, 12, 20, 13],
+        "sumLevel": 1600,
+        "sumPlacement": 708,
+        "sumTimeEliminated": 352087,
+        "sumDeckCost": 13892,
+        "sumTraitStyle": 1742,
+        "matchStats": [
+            {
+            },
+            {
+                "key": "last20",
+                "plays": 20,
+                "wins": 4,
+                "tops": 13,
+                "placements": [4, 5, 1, 3, 3, 2, 1, 1],
+                "companionStats": [
+                ],
+                "championStats": [
+                ],
+                "traitStats": [
+                ],
+                "traitStyleStats": [
+                ],
+                "itemStats": [
+                ]
+            }
+        ]
+    },
+    {
+    },
+    {
+    },
+    {
+    }
+]
+}

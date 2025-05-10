@@ -1,4 +1,3 @@
-import asyncio
 import discord
 from discord.ext import commands
 from discord.ui import View, Button
@@ -10,7 +9,9 @@ import random
 from keep_alive import keep_alive
 from playwright.async_api import async_playwright
 from tabulate import tabulate
+import aiohttp
 import re
+from collections import defaultdict
 
 load_dotenv()
 
@@ -269,112 +270,105 @@ def get_lp_value(rank_str):
         return 0
 
 Trait_Map = {
-    "난동꾼": "Bruiser",
-    "신성기업": "Divinicorp",
-    "선봉대": "Vanguard",
-    "기술광": "Techie",
-    "범죄 조직": "Syndicate",
-    "책략가": "Strategist",
-    "거리의 악마": "Street Demon",
-    "사이버보스": "Cyberboss",
-    "속사포": "Rapidfire",
-    "영혼 살해자": "Soul Killer",
-    "다이나모": "Dynamo",
-    "황금 황소": "Golden Ox",
-    "요새": "Bastion",
-    "엑소테크": "Exotech",
-    "동물특공대": "Anima Squad",
-    "사격수": "Marksman",
-    "군주": "Overlord",
-    "학살자": "Slayer",
-    "처형자": "Executioner",
-    "네트워크의 신": "God of the Net",
-    "폭발 봇": "BoomBot",
-    "증.폭.": "A.M.P.",
-    "바이러스": "Virus",
-    "사이퍼": "Cipher"
+    "TFT14_Bruiser": "Bruiser",
+    "TFT14_Divinicorp": "Divinicorp",
+    "TFT14_Vanguard": "Vanguard",
+    "TFT14_Techie": "Techie",
+    "TFT14_Mob": "Syndicate",
+    "TFT14_Controller": "Strategist",
+    "TFT14_StreetDemon": "Street Demon",
+    "TFT14_Cyberboss": "Cyberboss",
+    "TFT14_Swift": "Rapidfire",
+    "TFT14_ViegoUniqueTrait": "Soul Killer",
+    "TFT14_Thirsty": "Dynamo",
+    "TFT14_Immortal": "Golden Ox",
+    "TFT14_Armorclad": "Bastion",
+    "TFT14_EdgeRunner": "Exotech",
+    "TFT14_AnimaSquad": "Anima Squad",
+    "TFT14_Marksman": "Marksman",
+    "TFT14_Strong": "Slayer",
+    "TFT14_Cutter": "Executioner",
+    "TFT14_Netgod": "God of the Net",
+    "TFT14_BallisTek": "BoomBot",
+    "TFT14_Supercharge": "A.M.P.",
+    "TFT14_Virus": "Virus",
+    "TFT14_Suits": "Cipher",
+    "TFT14_Overlord": "Overlord",
 } 
 
-async def fetch_traits(summoner_name):
-    global browser
-    context = await browser.new_context()
-    page = await context.new_page()
+async def fetch_traits(summoner_name: str):
+    url = f"https://tft.dakgg.io/api/v1/summoners/na1/{summoner_name}/overviews?season=set14"
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+    }
 
-    await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "stylesheet", "font"] else route.continue_())
-
-    url = f"https://lolchess.gg/profile/na/{summoner_name}/set14/statistics?staticType=traits"
-    html = None
-
-    # Retry logic
-    max_retries = 3
-    for attempt in range(max_retries):
+    async with aiohttp.ClientSession() as session:
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-
-            # Wait for at least one data row
-            await page.wait_for_selector("table.css-meomra tbody tr:nth-child(1)", timeout=30000)
-
-            # Optional: detect "no data" message
-            if await page.query_selector(".NoData"):
-                print(f"No data available for {summoner_name}")
-                await context.close()
-                return []
-
-            html = await page.content()
-            break  # Exit loop on success
+            async with session.get(url, headers=headers, timeout=30) as resp:
+                if resp.status != 200:
+                    print(f"Failed to fetch data for {summoner_name}, status: {resp.status}")
+                    return []
+                data = await resp.json()
         except Exception as e:
-            print(f"Page load status on attempt {attempt + 1}: failed due to {e}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(2 ** attempt)  # 1s, 2s, 4s backoff
-            else:
-                print(f"Failed to fetch after {max_retries} attempts.")
-                await context.close()
-                return []
+            print(f"Error during API fetch: {e}")
+            return []
 
-    await context.close()
-
-    # Extra safeguard
-    if not html:
-        print("No HTML content retrieved.")
-        return []
-
-    with open("debug_traits.html", "w", encoding="utf-8") as f:
-        f.write(html)
-
-    soup = BeautifulSoup(html, 'html.parser')
-    table = soup.select_one('table.css-meomra')
-    if not table:
-        print("No table found in parsed HTML")
-        return []
-
-    rows = table.find('tbody').find_all('tr')
-    trait_data = []
-
-    for row in rows:
-        cols = row.find_all('td')
-        if len(cols) < 6:
-            print(f"Skipping incomplete row: {row}")
-            continue
-
-        raw_trait = cols[0].text.strip()
-        trait_clean = re.sub(r'\d+$', '', raw_trait)
-
-        for kor, eng in Trait_Map.items():
-            if kor in trait_clean:
-                trait_clean = trait_clean.replace(kor, eng)
+    trait_stats = []
+    try:
+        overviews = data.get("summonerSeasonOverviews", [])
+        for overview in overviews:
+            match_stats = overview.get("matchStats", [])
+            for match in match_stats:
+                if match.get("key") == "last20" and match.get("plays") == 20:
+                    trait_stats = match.get("traitStats", [])
+                    break
+            if trait_stats:
                 break
+    except Exception as e:
+        print(f"Error parsing nested traitStats: {e}")
+        return []
 
+    if not trait_stats:
+        print("No traitStats found in valid last20 match stats")
+        return []
+
+    print("Raw trait stats:", trait_stats)
+
+    from collections import defaultdict
+    grouped_traits = defaultdict(lambda: {"plays": 0, "wins": 0, "tops": 0, "placements": 0})
+
+    for entry in trait_stats:
         try:
-            trait_data.append({
-                "trait": trait_clean,
-                "plays": int(cols[1].text.strip().replace(",", "")),
-                "win_rate": float(cols[2].text.strip().replace("%", "")),
-                "top4_rate": float(cols[3].text.strip().replace("%", "")),
-                "avg_rank": float(cols[4].text.strip().replace("#", ""))
-            })
-        except ValueError as e:
-            print(f"Error parsing row values: {e}")
+            raw_trait = entry["key"][0]
+            grouped_traits[raw_trait]["plays"] += entry.get("plays", 0)
+            grouped_traits[raw_trait]["wins"] += entry.get("wins", 0)
+            grouped_traits[raw_trait]["tops"] += entry.get("tops", 0)
+            grouped_traits[raw_trait]["placements"] += entry.get("placements", 0)
+        except (KeyError, TypeError) as e:
+            print(f"Skipping malformed entry: {e}")
             continue
+
+    trait_data = []
+    for raw_trait, stats in grouped_traits.items():
+        plays = stats["plays"]
+        wins = stats["wins"]
+        tops = stats["tops"]
+        placements = stats["placements"]
+
+        trait_clean = Trait_Map.get(raw_trait, raw_trait)
+        win_rate = (wins / plays) * 100 if plays else 0
+        top4_rate = (tops / plays) * 100 if plays else 0
+        avg_rank = placements / plays if plays else 0
+
+        trait_data.append({
+            "trait": trait_clean,
+            "plays": plays,
+            "win_rate": round(win_rate, 2),
+            "top4_rate": round(top4_rate, 2),
+            "avg_rank": round(avg_rank, 2)
+        })
 
     print("Fetched traits:", trait_data)
     return trait_data
@@ -391,7 +385,7 @@ async def fetch_traits(summoner_name):
 
 def build_embed(data, sort_by):
     embed = discord.Embed(
-        title=f"🧠 Trait Stats (Sorted by {sort_by})",
+        title=f"🧠 Trait Stats - Last 20 Games (Sorted by {sort_by})",
         color=0xFFD700
     )
 
