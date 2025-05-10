@@ -7,7 +7,6 @@ import requests
 from bs4 import BeautifulSoup
 import random
 from keep_alive import keep_alive
-from playwright.async_api import async_playwright
 from tabulate import tabulate
 import aiohttp
 import re
@@ -23,16 +22,10 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
 player_stats = {}
-playwright = None
 browser = None
 
 @bot.event
 async def on_ready():
-    global playwright, browser
-    if playwright is None:
-        playwright = await async_playwright().start()
-    if browser is None:
-        browser = await playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
     print(f'Logged in as {bot.user}')
 
 @bot.event
@@ -336,7 +329,6 @@ async def fetch_traits(summoner_name: str):
 
     print("Raw trait stats:", trait_stats)
 
-    from collections import defaultdict
     grouped_traits = defaultdict(lambda: {"plays": 0, "wins": 0, "tops": 0, "placements": 0})
 
     for entry in trait_stats:
@@ -423,13 +415,13 @@ class TraitSortView(View):
         embed = build_embed(sorted_data, "Win Rate")
         await interaction.response.edit_message(embed=embed, view=self)
 
-    # @discord.ui.button(label="Top 4 Rate", style=discord.ButtonStyle.secondary)
-    # async def sort_top4(self, interaction: discord.Interaction, button: Button):
-    #     sorted_data = sorted(self.data, key=lambda x: x["top4_rate"], reverse=True)
-    #     embed = build_embed(sorted_data, "Top 4 Rate")
-    #     await interaction.response.edit_message(embed=embed, view=self)
+    @discord.ui.button(label="Top 4 Rate", style=discord.ButtonStyle.danger)
+    async def sort_top4(self, interaction: discord.Interaction, button: Button):
+        sorted_data = sorted(self.data, key=lambda x: x["top4_rate"], reverse=True)
+        embed = build_embed(sorted_data, "Top 4 Rate")
+        await interaction.response.edit_message(embed=embed, view=self)
 
-    @discord.ui.button(label="Avg Rank", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Avg Rank", style=discord.ButtonStyle.success)
     async def sort_avgrank(self, interaction: discord.Interaction, button: Button):
         sorted_data = sorted(self.data, key=lambda x: x["avg_rank"], reverse=False)
         embed = build_embed(sorted_data, "Avg Rank")
