@@ -327,7 +327,7 @@ async def fetch_traits(summoner_name: str):
         print("No traitStats found in valid last20 match stats")
         return []
 
-    print("Raw trait stats:", trait_stats)
+    # print("Raw trait stats:", trait_stats)
 
     grouped_traits = defaultdict(lambda: {"plays": 0, "wins": 0, "tops": 0, "placements": 0})
 
@@ -362,7 +362,7 @@ async def fetch_traits(summoner_name: str):
             "avg_rank": round(avg_rank, 2)
         })
 
-    print("Fetched traits:", trait_data)
+    # print("Fetched traits:", trait_data)
     return trait_data
 
 # def build_embed(data, sort_by):
