@@ -596,55 +596,76 @@ async def clear(ctx, amount: int = 5):
     await ctx.send(f"Cleared {amount} messages", delete_after=2)
 
 def scrape_tft_profile(summoner_name: str):
-    url = f"https://lolchess.gg/profile/na/{summoner_name.replace(' ', '%20')}"
-    response = requests.get(url, timeout=20)
-    response.raise_for_status()
-    soup = BeautifulSoup(response.text, 'html.parser')
+    encoded_name = quote(summoner_name)
+    profile_url = f"https://tft.dakgg.io/profile/na1/{encoded_name}"
+    overviews_url = f"https://tft.dakgg.io/api/v1/summoners/na1/{encoded_name}/overviews?season={CURRENT_TFT_SET}"
+    leagues_url = f"https://tft.dakgg.io/api/v1/summoners/na1/{encoded_name}/leagues"
+    summoner_url = f"https://tft.dakgg.io/api/v1/summoners/na1/{encoded_name}"
 
-    labels = soup.select('.labels')
-    mappings = [
-        ("Top4 비율", "Top 4 Rate"),
-        ("Top4", "Top 4s"),
-        ("승률", "Win Rate"),
-        ("승리", "Wins"),
-        ("게임 수", "Games Played"),
-        ("평균 등수", "Average Rank")
-    ]
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
-    stats = {}
-    for label in labels:
-        text = label.get_text(strip=True)
-        for key, name in mappings:
-            if text.startswith(key):
-                stats[name] = text.replace(key, '').strip()
-                break
+    overviews_resp = requests.get(overviews_url, headers=headers, timeout=20)
+    leagues_resp = requests.get(leagues_url, headers=headers, timeout=20)
+    summoner_resp = requests.get(summoner_url, headers=headers, timeout=20)
+    overviews_resp.raise_for_status()
+    leagues_resp.raise_for_status()
+    summoner_resp.raise_for_status()
 
-    required_keys = ["Wins", "Win Rate", "Top 4s", "Top 4 Rate", "Games Played", "Average Rank"]
-    if not all(key in stats for key in required_keys):
+    overviews_data = overviews_resp.json()
+    leagues_data = leagues_resp.json()
+    summoner_data = summoner_resp.json()
+
+    # Pull aggregate stats from season overview.
+    season_overviews = overviews_data.get("summonerSeasonOverviews", [])
+    if not season_overviews:
         return None
+    season_overview = season_overviews[0]
+    games_played = int(season_overview.get("plays", 0))
+    wins = int(season_overview.get("wins", 0))
+    tops = int(season_overview.get("tops", 0))
+    avg_rank_value = 0.0
+    if games_played > 0:
+        placements = season_overview.get("placements", [])
+        if isinstance(placements, list) and len(placements) == 8:
+            weighted_sum = sum((idx + 1) * int(count) for idx, count in enumerate(placements))
+            avg_rank_value = weighted_sum / games_played
 
-    profile_icon = soup.find('img', src=lambda x: x and 'profileicon' in x)
-    icon_url = profile_icon['src'] if profile_icon else None
-
-    rank_div = soup.find('div', class_='rank')
-    tier_icon_url = None
+    # Pull rank info from leagues.
     rank_text = "Unranked"
-    rank_color = "#A9A9A9"
     lp_text = "0LP"
-    if rank_div:
-        tier_img = rank_div.find('img', class_='tier')
-        tier_icon_url = tier_img['src'] if tier_img else None
-        tier_strong = rank_div.find('strong')
-        if tier_strong:
-            rank_text = tier_strong.get_text(strip=True)
-            style = tier_strong.get('style', '')
-            if ':' in style:
-                rank_color = style.split(':', 1)[1].strip()
-        lp_tag = rank_div.find('span')
-        lp_text = lp_tag.get_text(strip=True) if lp_tag else "0LP"
+    tier_icon_url = None
+    rank_color = "#A9A9A9"
+    leagues = leagues_data.get("summonerLeagues", [])
+    ranked_entry = next((x for x in leagues if x.get("queue") == "RANKED_TFT"), leagues[0] if leagues else None)
+    if ranked_entry:
+        tier_raw = (ranked_entry.get("tier") or "UNRANKED").title()
+        division = ranked_entry.get("rank") or ""
+        rank_text = f"{tier_raw} {division}".strip()
+        league_points = ranked_entry.get("leaguePoints", 0)
+        lp_text = f"{league_points}LP"
+        color_map = {
+            "Iron": "#6B6B6B", "Bronze": "#8C5A3C", "Silver": "#A7B1B8", "Gold": "#C9A14A",
+            "Platinum": "#4BA89C", "Diamond": "#5A77E0", "Master": "#A45CE7",
+            "Grandmaster": "#D94C4C", "Challenger": "#F2C94C", "Unranked": "#A9A9A9"
+        }
+        rank_color = color_map.get(tier_raw, "#A9A9A9")
+
+    summoner_obj = summoner_data.get("summoner", {})
+    icon_url = summoner_obj.get("profileIconUrl")
+
+    win_rate = (wins / games_played * 100) if games_played else 0
+    top4_rate = (tops / games_played * 100) if games_played else 0
+    stats = {
+        "Wins": f"{wins:,}",
+        "Win Rate": f"{win_rate:.2f}%",
+        "Top 4s": f"{tops:,}",
+        "Top 4 Rate": f"{top4_rate:.2f}%",
+        "Games Played": f"{games_played:,}",
+        "Average Rank": f"{avg_rank_value:.2f}",
+    }
 
     return {
-        "url": url,
+        "url": profile_url,
         "stats": stats,
         "rank_text": rank_text,
         "rank_color": rank_color,
