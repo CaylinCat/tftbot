@@ -38,6 +38,8 @@ DAILY_LEADERBOARD_CONFIG = {}
 PST_TIMEZONE = ZoneInfo("America/Los_Angeles")
 COMPS_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1QREhel46OklYQ3qeWbjZ62fBpXiYK7Jq-xVjPTrnDnY/export?format=csv&gid=1524437377"
 comps_cache = []
+MENTALHELP_CONFIG = {}
+message_streak_state = {}
 
 @bot.event
 async def on_ready():
@@ -53,6 +55,7 @@ async def on_ready():
 async def on_message(message):
     if message.author == bot.user:
         return
+    await maybe_send_mentalhelp_prompt(message)
     if bot.user.mentioned_in(message):
         await message.channel.send("hi")
     await bot.process_commands(message)
@@ -576,16 +579,53 @@ async def dailyleaderboard(ctx, mode: str):
 
     await ctx.send("Use `!dailyleaderboard on` or `!dailyleaderboard off`.")
 
+@bot.command(name='mentalhelp')
+@commands.has_permissions(manage_guild=True)
+async def mentalhelp(ctx, channel_name: str, mode: str):
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+
+    mode = mode.lower().strip()
+    channel = resolve_text_channel(ctx, channel_name)
+    if channel is None:
+        await ctx.send("Couldn't find that text channel. Use `#channel` mention or exact name.")
+        return
+
+    guild_key = str(ctx.guild.id)
+    guild_config = MENTALHELP_CONFIG.get(guild_key, {})
+    enabled_channels = set(guild_config.get("enabled_channels", []))
+
+    if mode == "on":
+        enabled_channels.add(channel.id)
+        MENTALHELP_CONFIG[guild_key] = {"enabled_channels": list(enabled_channels)}
+        save_leaderboard_data()
+        await ctx.send(f"🧠 Mental help support is now ON for {channel.mention}.")
+        return
+
+    if mode == "off":
+        enabled_channels.discard(channel.id)
+        MENTALHELP_CONFIG[guild_key] = {"enabled_channels": list(enabled_channels)}
+        save_leaderboard_data()
+        await ctx.send(f"🛑 Mental help support is now OFF for {channel.mention}.")
+        return
+
+    await ctx.send("Use `!mentalhelp <channel_name> on` or `!mentalhelp <channel_name> off`.")
+
 @bot.command(name='help')
 async def help(ctx):
     help_message = (
         "**Available Commands:**\n"
         "✨ **!tft <name>** - Fetches TFT stats for a player.\n"
         "💖 **!leaderboard <stat>** - Shows the leaderboard sorted by a stat (wins, winrate, top4s, top4rate, games, avgrank, rank).\n"
-        "🤖 **!tftbot <text>** - Chat trigger bot (try: hi, welcome back, how are you, when weston).\n"
+        "🧠 **!traits <name>** - Shows trait stats from the last 20 games with sort buttons.\n"
+        "🤖 **!tftbot <text>** - Talk to me. What's on your mind?\n"
+        "🔄 **!refreshnow** - Manually refreshes tracked leaderboard players.\n"
+        "📅 **!dailyleaderboard on/off** - Turns midnight PST top-3 posting on/off for this channel.\n"
         "🌟 **!loser** - Call someone a loser.\n"
         "🌸 **!weston** - Cause he DID get me to emerald but also called me vanessa so HMMM.\n"
         "🌈 **!delete <name>** - Deletes a player from the leaderboard.\n"
+        "🧹 **!clear [amount]** - Deletes recent messages.\n"
     )
     await ctx.send(help_message)
 
@@ -711,12 +751,13 @@ def save_leaderboard_data():
         "player_stats": player_stats,
         "tracked_players": list(tracked_players),
         "daily_leaderboard_config": DAILY_LEADERBOARD_CONFIG,
+        "mentalhelp_config": MENTALHELP_CONFIG,
     }
     with open(LEADERBOARD_DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
 def load_leaderboard_data():
-    global player_stats, tracked_players, DAILY_LEADERBOARD_CONFIG
+    global player_stats, tracked_players, DAILY_LEADERBOARD_CONFIG, MENTALHELP_CONFIG
     if not os.path.exists(LEADERBOARD_DATA_FILE):
         return
     try:
@@ -725,8 +766,58 @@ def load_leaderboard_data():
         player_stats = payload.get("player_stats", {})
         tracked_players = set(payload.get("tracked_players", []))
         DAILY_LEADERBOARD_CONFIG = payload.get("daily_leaderboard_config", {})
+        MENTALHELP_CONFIG = payload.get("mentalhelp_config", {})
     except Exception as e:
         print(f"Failed to load leaderboard data: {e}")
+
+def resolve_text_channel(ctx, channel_name: str):
+    target = channel_name.strip()
+    if target.startswith("<#") and target.endswith(">"):
+        try:
+            channel_id = int(target[2:-1])
+            channel = ctx.guild.get_channel(channel_id)
+            return channel if isinstance(channel, discord.TextChannel) else None
+        except ValueError:
+            return None
+
+    normalized = target.lstrip("#").lower()
+    for channel in ctx.guild.text_channels:
+        if channel.name.lower() == normalized:
+            return channel
+    return None
+
+async def maybe_send_mentalhelp_prompt(message):
+    if not message.guild or not isinstance(message.channel, discord.TextChannel):
+        return
+
+    guild_key = str(message.guild.id)
+    guild_config = MENTALHELP_CONFIG.get(guild_key, {})
+    enabled_channels = set(guild_config.get("enabled_channels", []))
+    if message.channel.id not in enabled_channels:
+        return
+
+    state_key = f"{message.guild.id}:{message.channel.id}"
+    state = message_streak_state.get(state_key, {"author_id": None, "count": 0, "alerted": False})
+
+    if state["author_id"] == message.author.id:
+        state["count"] += 1
+    else:
+        state = {"author_id": message.author.id, "count": 1, "alerted": False}
+
+    if state["count"] >= 13 and not state.get("alerted"):
+        supportive_message = (
+            f"Hey {message.author.name}, it looks like you're tilted. "
+            "If today feels heavy, take a minute to pause and breathe before rage qing 5 more games. "
+            "Drop your shoulders, unclench your jaw, inhale for 4 seconds, hold for 4, and exhale slowly for 6. "
+            "Do that a few times, sip some water, and give your mind a short break. "
+            "You don't have to fix everything right now, and you are allowed to step away and come back when you feel steady. "
+            "Your LP deserves better. You don't have to demote by 2 ranks now. It's ok. "
+            "With one step at a time, we can save everyone's lp. Thank you. 💙"
+        )
+        await message.channel.send(supportive_message)
+        state["alerted"] = True
+
+    message_streak_state[state_key] = state
 
 def refresh_comps_cache():
     global comps_cache
