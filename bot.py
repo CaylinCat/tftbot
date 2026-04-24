@@ -13,6 +13,11 @@ import re
 from collections import defaultdict
 from urllib.parse import quote
 import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from datetime import time as dt_time
+import csv
+import io
 
 load_dotenv()
 
@@ -29,12 +34,19 @@ CURRENT_TFT_SET = "set17"
 TRAITS_DATA_URL = "https://tft.dakgg.io/api/v1/data/traits?hl=en&season={season}"
 LEADERBOARD_DATA_FILE = "leaderboard_data.json"
 tracked_players = set()
+DAILY_LEADERBOARD_CONFIG = {}
+PST_TIMEZONE = ZoneInfo("America/Los_Angeles")
+COMPS_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1QREhel46OklYQ3qeWbjZ62fBpXiYK7Jq-xVjPTrnDnY/export?format=csv&gid=1524437377"
+comps_cache = []
 
 @bot.event
 async def on_ready():
     load_leaderboard_data()
+    refresh_comps_cache()
     if not daily_leaderboard_refresh.is_running():
         daily_leaderboard_refresh.start()
+    if not daily_leaderboard_poster.is_running():
+        daily_leaderboard_poster.start()
     print(f'Logged in as {bot.user}')
 
 @bot.event
@@ -120,7 +132,7 @@ async def tft(ctx, *, summoner_name):
 
         await ctx.send(embed=embed)
 
-        upsert_player_stats(summoner_name, stats, rank_text, lp_text)
+        upsert_player_stats(summoner_name, stats, rank_text, lp_text, tier_icon_url)
         save_leaderboard_data()
 
     except Exception as e:
@@ -156,7 +168,7 @@ async def leaderboard(ctx, stat: str):
 
     # Sort based on stat
     if stat_key == 'Rank':
-        sorted_stats = sorted(player_stats.items(), key=lambda x: (get_rank_value(x[1][stat_key]), get_lp_value(x[1][stat_key])), reverse=False)
+        sorted_stats = sorted(player_stats.items(), key=lambda x: (get_rank_value(x[1][stat_key]), get_lp_value(x[1][stat_key])), reverse=True)
     elif stat_key == 'Average Rank':
         sorted_stats = sorted(player_stats.items(), key=lambda x: float(x[1][stat_key].replace('#', '').strip()), reverse=False)
     elif stat_key in ['Win Rate', 'Top 4 Rate']:
@@ -490,12 +502,87 @@ async def refreshnow(ctx):
     save_leaderboard_data()
     await ctx.send(f"Refreshed **{refreshed}** tracked players.")
 
+@bot.command(name='tftbot')
+async def tftbot(ctx, *, user_text: str = ""):
+    text = user_text.strip().lower()
+    if not text:
+        await ctx.send("say something to me bestie ✨ try `!tftbot hi`")
+        return
+
+    triggers = [
+        ("welcome back", [
+            "welcome back, cutie. mortdog patched the game but not my obsession with your LP climb 💋",
+            "you are back? okay then i'm locked in like k3soju on a reroll line 😘",
+            "wb bestie. the lobby got hotter the second you queued up 🔥",
+        ]),
+        ("hi", [
+            "hi gorgeous, are we playing clean tempo or boxbox-style chaos today? 👀",
+            "hey you 💖 i can be your pocket coach if you promise to hold hands on 2-1",
+            "hiii, i brought imaqtpie vibes and a dangerously confident level 8 roll down 😏",
+        ]),
+        ("how are you", [
+            "i'm feeling spicy, slightly contested, and still ready to carry you to top 4 😌",
+            "honestly? like a highroll soju opener: cute, dangerous, and up 30 hp 😘",
+            "better now that you're here. call it a two-star mood with perfect items 💫",
+        ]),
+        ("when weston", [
+            "right after mortdog blesses your shop and stops griefing your augments 🕯️",
+            "weston going up when the lobby is weak and your board is looking disrespectfully cute 😮‍💨",
+            "soon. like a boxbox pivot, he'll appear exactly when you least deserve it 😤",
+        ]),
+    ]
+
+    for trigger, replies in triggers:
+        if text.startswith(trigger):
+            await ctx.send(random.choice(replies))
+            return
+
+    comp_row = get_random_comp_row()
+    if comp_row:
+        await ctx.send(format_comp_reply(comp_row))
+    else:
+        default_replies = [
+            "laaaaaaaaaaameeeeeeeeeeeeee",
+            "A weston crashout would get my bot banned so just image it 😔",
+            "you're just 8th.",
+        ]
+        await ctx.send(random.choice(default_replies))
+
+@bot.command(name='dailyleaderboard')
+@commands.has_permissions(manage_guild=True)
+async def dailyleaderboard(ctx, mode: str):
+    mode = mode.lower().strip()
+    guild_key = str(ctx.guild.id) if ctx.guild else "dm"
+
+    if mode == "on":
+        DAILY_LEADERBOARD_CONFIG[guild_key] = {
+            "enabled": True,
+            "channel_id": ctx.channel.id,
+            "last_post_date": DAILY_LEADERBOARD_CONFIG.get(guild_key, {}).get("last_post_date"),
+        }
+        save_leaderboard_data()
+        await ctx.send("✅ Daily leaderboard is now ON. I'll post top 3 at **12:00 AM PST** in this channel.")
+        return
+
+    if mode == "off":
+        DAILY_LEADERBOARD_CONFIG[guild_key] = {
+            "enabled": False,
+            "channel_id": DAILY_LEADERBOARD_CONFIG.get(guild_key, {}).get("channel_id"),
+            "last_post_date": DAILY_LEADERBOARD_CONFIG.get(guild_key, {}).get("last_post_date"),
+        }
+        save_leaderboard_data()
+        await ctx.send("🛑 Daily leaderboard is now OFF.")
+        return
+
+    await ctx.send("Use `!dailyleaderboard on` or `!dailyleaderboard off`.")
+
 @bot.command(name='help')
 async def help(ctx):
     help_message = (
         "**Available Commands:**\n"
         "✨ **!tft <name>** - Fetches TFT stats for a player.\n"
         "💖 **!leaderboard <stat>** - Shows the leaderboard sorted by a stat (wins, winrate, top4s, top4rate, games, avgrank, rank).\n"
+        "🤖 **!tftbot <text>** - Chat trigger bot (try: hi, welcome back, how are you, when weston).\n"
         "🌟 **!loser** - Call someone a loser.\n"
         "🌸 **!weston** - Cause he DID get me to emerald but also called me vanessa so HMMM.\n"
         "🌈 **!delete <name>** - Deletes a player from the leaderboard.\n"
@@ -566,7 +653,7 @@ def scrape_tft_profile(summoner_name: str):
         "tier_icon_url": tier_icon_url,
     }
 
-def upsert_player_stats(summoner_name: str, stats: dict, rank_text: str, lp_text: str):
+def upsert_player_stats(summoner_name: str, stats: dict, rank_text: str, lp_text: str, tier_icon_url: str = None):
     player_stats[summoner_name] = {
         "Wins": stats["Wins"],
         "Win Rate": stats["Win Rate"],
@@ -574,7 +661,8 @@ def upsert_player_stats(summoner_name: str, stats: dict, rank_text: str, lp_text
         "Top 4 Rate": stats["Top 4 Rate"],
         "Games Played": stats["Games Played"],
         "Average Rank": stats["Average Rank"],
-        "Rank": f"{rank_text} {lp_text}"
+        "Rank": f"{rank_text} {lp_text}",
+        "Tier Icon URL": tier_icon_url,
     }
     tracked_players.add(summoner_name)
 
@@ -590,6 +678,7 @@ async def refresh_all_tracked_players():
                 profile_data["stats"],
                 profile_data["rank_text"],
                 profile_data["lp_text"],
+                profile_data["tier_icon_url"],
             )
             refreshed += 1
         except Exception as e:
@@ -600,12 +689,13 @@ def save_leaderboard_data():
     payload = {
         "player_stats": player_stats,
         "tracked_players": list(tracked_players),
+        "daily_leaderboard_config": DAILY_LEADERBOARD_CONFIG,
     }
     with open(LEADERBOARD_DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
 def load_leaderboard_data():
-    global player_stats, tracked_players
+    global player_stats, tracked_players, DAILY_LEADERBOARD_CONFIG
     if not os.path.exists(LEADERBOARD_DATA_FILE):
         return
     try:
@@ -613,8 +703,95 @@ def load_leaderboard_data():
             payload = json.load(f)
         player_stats = payload.get("player_stats", {})
         tracked_players = set(payload.get("tracked_players", []))
+        DAILY_LEADERBOARD_CONFIG = payload.get("daily_leaderboard_config", {})
     except Exception as e:
         print(f"Failed to load leaderboard data: {e}")
+
+def refresh_comps_cache():
+    global comps_cache
+    try:
+        response = requests.get(COMPS_SHEET_CSV_URL, timeout=20)
+        response.raise_for_status()
+        text = response.text
+        reader = csv.DictReader(io.StringIO(text))
+
+        parsed_rows = []
+        for row in reader:
+            tier = (row.get("TIER") or "").strip()
+            type_value = (row.get("TYPE") or "").strip()
+            name = (row.get("NAME") or "").strip()
+            if not (tier and type_value and name):
+                continue
+
+            parsed_rows.append({
+                "tier": tier,
+                "type": type_value,
+                "name": name,
+                "conditions": (row.get("CONDITIONS") or "").strip(),
+                "board": (row.get("BOARD") or "").strip(),
+                "notes": (row.get("NOTES") or "").strip(),
+                "items": (row.get("ITEMS") or "").strip(),
+                "component_pref": (row.get("Component Pref") or "").strip(),
+            })
+
+        if parsed_rows:
+            comps_cache = parsed_rows
+    except Exception as e:
+        print(f"Failed to refresh comps cache: {e}")
+
+def get_random_comp_row():
+    if not comps_cache:
+        refresh_comps_cache()
+    if not comps_cache:
+        return None
+    return random.choice(comps_cache)
+
+def format_comp_reply(comp):
+    conditions = comp["conditions"] if comp["conditions"] else "No special condition listed"
+    items = comp["items"] if comp["items"] else "No item line listed"
+    component_pref = comp["component_pref"] if comp["component_pref"] else "N/A"
+    notes = comp["notes"] if comp["notes"] else "No notes listed"
+
+    return (
+        f"🎯 **{comp['tier']} Tier • {comp['type']} • {comp['name']}**\n"
+        f"**Conditions:** {conditions}\n"
+        f"**Items:** {items}\n"
+        f"**Component Pref:** {component_pref}\n"
+        f"**Notes:** {notes[:220]}"
+    )
+
+def get_top_ranked_players(limit=3):
+    return sorted(
+        player_stats.items(),
+        key=lambda x: (get_rank_value(x[1]["Rank"]), get_lp_value(x[1]["Rank"])),
+        reverse=True
+    )[:limit]
+
+def build_daily_leaderboard_embed(top_players):
+    sparkle = random.choice(["✨", "💖", "🌸", "🌟", "🌈"])
+    embed = discord.Embed(
+        title=f"{sparkle} Daily TFT Top 3 Leaderboard {sparkle}",
+        description="```text\n      🥇\n   🥈     🥉\n  2nd     3rd\n      1st\n```",
+        color=discord.Color.magenta()
+    )
+
+    medals = ["🥇", "🥈", "🥉"]
+    labels = ["1st Place", "2nd Place", "3rd Place"]
+    for i, (name, stats) in enumerate(top_players):
+        badge_url = stats.get("Tier Icon URL")
+        badge_text = f"({badge_url})" if badge_url else "🛡️"
+        embed.add_field(
+            name=f"{medals[i]} {labels[i]} — {name}",
+            value=f"{badge_text}\n**{stats['Rank']}**",
+            inline=False
+        )
+
+    first_badge_url = top_players[0][1].get("Tier Icon URL")
+    if first_badge_url:
+        embed.set_thumbnail(url=first_badge_url)
+
+    embed.set_footer(text="Don't get mortdogged losers :P")
+    return embed
 
 @tasks.loop(hours=24)
 async def daily_leaderboard_refresh():
@@ -625,6 +802,40 @@ async def daily_leaderboard_refresh():
 
 @daily_leaderboard_refresh.before_loop
 async def before_daily_refresh():
+    await bot.wait_until_ready()
+
+@tasks.loop(time=dt_time(hour=0, minute=0, tzinfo=PST_TIMEZONE))
+async def daily_leaderboard_poster():
+    now_pst = datetime.now(PST_TIMEZONE)
+    today = now_pst.strftime("%Y-%m-%d")
+    top_players = get_top_ranked_players(limit=3)
+    if len(top_players) == 0:
+        return
+
+    for guild_key, config in DAILY_LEADERBOARD_CONFIG.items():
+        if not config.get("enabled"):
+            continue
+        if config.get("last_post_date") == today:
+            continue
+
+        channel_id = config.get("channel_id")
+        if not channel_id:
+            continue
+
+        channel = bot.get_channel(channel_id)
+        if channel is None:
+            continue
+
+        try:
+            await channel.send(embed=build_daily_leaderboard_embed(top_players))
+            config["last_post_date"] = today
+        except Exception as e:
+            print(f"Failed posting daily leaderboard to guild {guild_key}: {e}")
+
+    save_leaderboard_data()
+
+@daily_leaderboard_poster.before_loop
+async def before_daily_leaderboard_poster():
     await bot.wait_until_ready()
 
 keep_alive()
