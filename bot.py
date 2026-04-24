@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord.ui import View, Button
 import os
 from dotenv import load_dotenv
@@ -11,6 +11,8 @@ from tabulate import tabulate
 import aiohttp
 import re
 from collections import defaultdict
+from urllib.parse import quote
+import json
 
 load_dotenv()
 
@@ -23,9 +25,16 @@ bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
 player_stats = {}
 browser = None
+CURRENT_TFT_SET = "set17"
+TRAITS_DATA_URL = "https://tft.dakgg.io/api/v1/data/traits?hl=en&season={season}"
+LEADERBOARD_DATA_FILE = "leaderboard_data.json"
+tracked_players = set()
 
 @bot.event
 async def on_ready():
+    load_leaderboard_data()
+    if not daily_leaderboard_refresh.is_running():
+        daily_leaderboard_refresh.start()
     print(f'Logged in as {bot.user}')
 
 @bot.event
@@ -74,61 +83,18 @@ async def weston(ctx):
 
 @bot.command(name='tft')
 async def tft(ctx, *, summoner_name):
-    url = f"https://lolchess.gg/profile/na/{summoner_name.replace(' ', '%20')}"
-    
     try:
-        response = requests.get(url)
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        labels = soup.select('.labels')
-
-        mappings = [
-            ("Top4 비율", "Top 4 Rate"),
-            ("Top4", "Top 4s"),
-            ("승률", "Win Rate"),
-            ("승리", "Wins"),
-            ("게임 수", "Games Played"),
-            ("평균 등수", "Average Rank")
-        ]
-
-        stats = {}
-
-        for label in labels:
-            text = label.get_text(strip=True)
-            for key, name in mappings:
-                if text.startswith(key):
-                    stats[name] = text.replace(key, '').strip()
-                    break
-
-        required_keys = ["Wins", "Win Rate", "Top 4s", "Top 4 Rate", "Games Played", "Average Rank"]
-        if not all(key in stats for key in required_keys):
+        profile_data = scrape_tft_profile(summoner_name)
+        if not profile_data:
             await ctx.send(f"Could not retrieve valid data for {summoner_name}. Please check the summoner name or region.")
             return
-
-        # Scrape pfp
-        profile_icon = soup.find('img', src=lambda x: x and 'profileicon' in x)
-        icon_url = profile_icon['src'] if profile_icon else None
-
-        # Scrape rank, LP, and color
-        rank_div = soup.find('div', class_='rank')
-        if rank_div:
-            tier_img = rank_div.find('img', class_='tier')
-            tier_icon_url = tier_img['src'] if tier_img else None
-            tier_strong = rank_div.find('strong')
-            if tier_strong:
-                rank_text = tier_strong.get_text(strip=True)
-                rank_color = tier_strong['style'].split(':')[1].strip()
-            else:
-                rank_text = "Unranked"
-                rank_color = "#A9A9A9" 
-
-            lp_tag = rank_div.find('span')
-            lp_text = lp_tag.get_text(strip=True) if lp_tag else "0LP"
-        else:
-            tier_icon_url = None
-            rank_text = "Unranked"
-            rank_color = "#A9A9A9"
-            lp_text = "0LP"
+        url = profile_data["url"]
+        stats = profile_data["stats"]
+        rank_text = profile_data["rank_text"]
+        rank_color = profile_data["rank_color"]
+        lp_text = profile_data["lp_text"]
+        icon_url = profile_data["icon_url"]
+        tier_icon_url = profile_data["tier_icon_url"]
 
         # Create an embed
         embed = discord.Embed(
@@ -154,15 +120,8 @@ async def tft(ctx, *, summoner_name):
 
         await ctx.send(embed=embed)
 
-        player_stats[summoner_name] = {
-            "Wins": stats["Wins"],
-            "Win Rate": stats["Win Rate"],
-            "Top 4s": stats["Top 4s"],
-            "Top 4 Rate": stats["Top 4 Rate"],
-            "Games Played": stats["Games Played"],
-            "Average Rank": stats["Average Rank"],
-            "Rank": f"{rank_text} {lp_text}"
-        }
+        upsert_player_stats(summoner_name, stats, rank_text, lp_text)
+        save_leaderboard_data()
 
     except Exception as e:
         await ctx.send(f"An error occurred while retrieving data for {summoner_name}: {e}")
@@ -262,35 +221,49 @@ def get_lp_value(rank_str):
     except ValueError:
         return 0
 
-Trait_Map = {
-    "TFT14_Bruiser": "Bruiser",
-    "TFT14_Divinicorp": "Divinicorp",
-    "TFT14_Vanguard": "Vanguard",
-    "TFT14_Techie": "Techie",
-    "TFT14_Mob": "Syndicate",
-    "TFT14_Controller": "Strategist",
-    "TFT14_StreetDemon": "Street Demon",
-    "TFT14_Cyberboss": "Cyberboss",
-    "TFT14_Swift": "Rapidfire",
-    "TFT14_ViegoUniqueTrait": "Soul Killer",
-    "TFT14_Thirsty": "Dynamo",
-    "TFT14_Immortal": "Golden Ox",
-    "TFT14_Armorclad": "Bastion",
-    "TFT14_EdgeRunner": "Exotech",
-    "TFT14_AnimaSquad": "Anima Squad",
-    "TFT14_Marksman": "Marksman",
-    "TFT14_Strong": "Slayer",
-    "TFT14_Cutter": "Executioner",
-    "TFT14_Netgod": "God of the Net",
-    "TFT14_BallisTek": "BoomBot",
-    "TFT14_Supercharge": "A.M.P.",
-    "TFT14_Virus": "Virus",
-    "TFT14_Suits": "Cipher",
-    "TFT14_Overlord": "Overlord",
-} 
+DEFAULT_TRAIT_MAP = {
+    "TFT17_MeleeTrait": "Melee",
+    "TFT17_SummonTrait": "Summoner",
+    "TFT17_ShieldTank": "Shield Tank",
+    "TFT17_SpaceGroove": "Space Groove",
+    "TFT17_ManaTrait": "Mana",
+    "TFT17_RangedTrait": "Ranged",
+    "TFT17_MorganaUniqueTrait": "Morgana",
+    "TFT17_Fateweaver": "Fateweaver",
+    "TFT17_JhinUniqueTrait": "Jhin",
+    "TFT17_ShenUniqueTrait": "Shen",
+    "TFT17_DarkStar": "Dark Star",
+    "TFT17_FlexTrait": "Flex",
+    "TFT17_ResistTank": "Resist Tank",
+    "TFT17_AssassinTrait": "Assassin",
+    "TFT17_BlitzcrankUniqueTrait": "Blitzcrank",
+    "TFT17_SonaUniqueTrait": "Sona",
+    "TFT17_RhaastUniqueTrait": "Rhaast",
+    "TFT17_DRX": "DRX",
+    "TFT17_APTrait": "AP",
+    "TFT17_PsyOps": "PsyOps",
+    "TFT17_Timebreaker": "Timebreaker",
+    "TFT17_VexUniqueTrait": "Vex",
+    "TFT17_Astronaut": "Astronaut",
+    "TFT17_FioraUniqueTrait": "Fiora",
+}
+Trait_Map = DEFAULT_TRAIT_MAP.copy()
+
+def normalize_trait_name(raw_trait: str) -> str:
+    if raw_trait in Trait_Map:
+        return Trait_Map[raw_trait]
+
+    cleaned = raw_trait
+    cleaned = re.sub(r"^TFT\d+_", "", cleaned)
+    cleaned = cleaned.replace("UniqueTrait", "")
+    cleaned = re.sub(r"([a-z])([A-Z])", r"\1 \2", cleaned)
+    cleaned = cleaned.replace("_", " ").strip()
+    return cleaned or raw_trait
 
 async def fetch_traits(summoner_name: str):
-    url = f"https://tft.dakgg.io/api/v1/summoners/na1/{summoner_name}/overviews?season=set14"
+    await refresh_trait_map()
+    encoded_name = quote(summoner_name)
+    url = f"https://tft.dakgg.io/api/v1/summoners/na1/{encoded_name}/overviews?season={CURRENT_TFT_SET}"
     
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -333,7 +306,13 @@ async def fetch_traits(summoner_name: str):
 
     for entry in trait_stats:
         try:
-            raw_trait = entry["key"][0]
+            key_value = entry.get("key")
+            if isinstance(key_value, list) and key_value:
+                raw_trait = key_value[0]
+            elif isinstance(key_value, str):
+                raw_trait = key_value
+            else:
+                raise KeyError("Missing trait key")
             grouped_traits[raw_trait]["plays"] += entry.get("plays", 0)
             grouped_traits[raw_trait]["wins"] += entry.get("wins", 0)
             grouped_traits[raw_trait]["tops"] += entry.get("tops", 0)
@@ -349,7 +328,7 @@ async def fetch_traits(summoner_name: str):
         tops = stats["tops"]
         placements = stats["placements"]
 
-        trait_clean = Trait_Map.get(raw_trait, raw_trait)
+        trait_clean = normalize_trait_name(raw_trait)
         win_rate = (wins / plays) * 100 if plays else 0
         top4_rate = (tops / plays) * 100 if plays else 0
         avg_rank = placements / plays if plays else 0
@@ -364,6 +343,40 @@ async def fetch_traits(summoner_name: str):
 
     # print("Fetched traits:", trait_data)
     return trait_data
+
+async def refresh_trait_map():
+    global Trait_Map
+
+    url = TRAITS_DATA_URL.format(season=CURRENT_TFT_SET)
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=30) as resp:
+                if resp.status != 200:
+                    print(f"Trait map request failed with status: {resp.status}")
+                    return
+
+                payload = await resp.json()
+                api_traits = payload.get("traits", [])
+                if not api_traits:
+                    print("Trait map response had no traits")
+                    return
+
+                dynamic_map = {}
+                for trait in api_traits:
+                    ingame_key = trait.get("ingameKey")
+                    trait_name = trait.get("name")
+                    if ingame_key and trait_name:
+                        dynamic_map[ingame_key] = trait_name
+
+                if dynamic_map:
+                    Trait_Map = {**DEFAULT_TRAIT_MAP, **dynamic_map}
+    except Exception as e:
+        print(f"Trait map refresh error: {e}")
 
 # def build_embed(data, sort_by):
 #     embed = discord.Embed(title=f"🧠 Trait Stats (Sorted by {sort_by})", color=0xFFD700)
@@ -429,7 +442,7 @@ class TraitSortView(View):
 
 @bot.command()
 async def traits(ctx, *, summoner_name):
-    data = await fetch_traits(summoner_name.replace(' ', '%20'))
+    data = await fetch_traits(summoner_name)
     if not data:
         await ctx.send("❌ Couldn't fetch data. Make sure the summoner name is correct.")
         return
@@ -438,14 +451,44 @@ async def traits(ctx, *, summoner_name):
     embed = build_embed(sorted_data, sort_by="Plays")
     view = TraitSortView(data)
     await ctx.send(embed=embed, view=view)
+
+@bot.command(name='traitstest')
+async def traitstest(ctx, *, summoner_name: str = "Satella018-LOOT"):
+    data = await fetch_traits(summoner_name)
+    if not data:
+        await ctx.send(f"❌ No trait data returned for **{summoner_name}**.")
+        return
+
+    sorted_data = sorted(data, key=lambda x: x["plays"], reverse=True)
+    embed = build_embed(sorted_data, sort_by="Plays")
+    preview_lines = [
+        f"✅ Loaded **{len(data)}** traits for **{summoner_name}**.",
+        "Top 3 parsed rows:",
+    ]
+    for entry in sorted_data[:3]:
+        preview_lines.append(
+            f"- {entry['trait']}: plays={entry['plays']}, win={entry['win_rate']}%, top4={entry['top4_rate']}%, avg={entry['avg_rank']}"
+        )
+
+    await ctx.send("\n".join(preview_lines))
+    await ctx.send(embed=embed)
     
 @bot.command(name='delete')
 async def delete(ctx, *, player_name: str):
     if player_name in player_stats:
         del player_stats[player_name]
+        tracked_players.discard(player_name)
+        save_leaderboard_data()
         await ctx.send(f"✅ Successfully deleted **{player_name}** from your mom!")
     else:
         await ctx.send(f"❌ Player **{player_name}** not found in da leaderboard :( womp womp)")
+
+@bot.command(name='refreshnow')
+@commands.has_permissions(manage_guild=True)
+async def refreshnow(ctx):
+    refreshed = await refresh_all_tracked_players()
+    save_leaderboard_data()
+    await ctx.send(f"Refreshed **{refreshed}** tracked players.")
 
 @bot.command(name='help')
 async def help(ctx):
@@ -464,6 +507,125 @@ async def help(ctx):
 async def clear(ctx, amount: int = 5):
     await ctx.channel.purge(limit=amount)
     await ctx.send(f"Cleared {amount} messages", delete_after=2)
+
+def scrape_tft_profile(summoner_name: str):
+    url = f"https://lolchess.gg/profile/na/{summoner_name.replace(' ', '%20')}"
+    response = requests.get(url, timeout=20)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, 'html.parser')
+
+    labels = soup.select('.labels')
+    mappings = [
+        ("Top4 비율", "Top 4 Rate"),
+        ("Top4", "Top 4s"),
+        ("승률", "Win Rate"),
+        ("승리", "Wins"),
+        ("게임 수", "Games Played"),
+        ("평균 등수", "Average Rank")
+    ]
+
+    stats = {}
+    for label in labels:
+        text = label.get_text(strip=True)
+        for key, name in mappings:
+            if text.startswith(key):
+                stats[name] = text.replace(key, '').strip()
+                break
+
+    required_keys = ["Wins", "Win Rate", "Top 4s", "Top 4 Rate", "Games Played", "Average Rank"]
+    if not all(key in stats for key in required_keys):
+        return None
+
+    profile_icon = soup.find('img', src=lambda x: x and 'profileicon' in x)
+    icon_url = profile_icon['src'] if profile_icon else None
+
+    rank_div = soup.find('div', class_='rank')
+    tier_icon_url = None
+    rank_text = "Unranked"
+    rank_color = "#A9A9A9"
+    lp_text = "0LP"
+    if rank_div:
+        tier_img = rank_div.find('img', class_='tier')
+        tier_icon_url = tier_img['src'] if tier_img else None
+        tier_strong = rank_div.find('strong')
+        if tier_strong:
+            rank_text = tier_strong.get_text(strip=True)
+            style = tier_strong.get('style', '')
+            if ':' in style:
+                rank_color = style.split(':', 1)[1].strip()
+        lp_tag = rank_div.find('span')
+        lp_text = lp_tag.get_text(strip=True) if lp_tag else "0LP"
+
+    return {
+        "url": url,
+        "stats": stats,
+        "rank_text": rank_text,
+        "rank_color": rank_color,
+        "lp_text": lp_text,
+        "icon_url": icon_url,
+        "tier_icon_url": tier_icon_url,
+    }
+
+def upsert_player_stats(summoner_name: str, stats: dict, rank_text: str, lp_text: str):
+    player_stats[summoner_name] = {
+        "Wins": stats["Wins"],
+        "Win Rate": stats["Win Rate"],
+        "Top 4s": stats["Top 4s"],
+        "Top 4 Rate": stats["Top 4 Rate"],
+        "Games Played": stats["Games Played"],
+        "Average Rank": stats["Average Rank"],
+        "Rank": f"{rank_text} {lp_text}"
+    }
+    tracked_players.add(summoner_name)
+
+async def refresh_all_tracked_players():
+    refreshed = 0
+    for summoner_name in list(tracked_players):
+        try:
+            profile_data = scrape_tft_profile(summoner_name)
+            if not profile_data:
+                continue
+            upsert_player_stats(
+                summoner_name,
+                profile_data["stats"],
+                profile_data["rank_text"],
+                profile_data["lp_text"],
+            )
+            refreshed += 1
+        except Exception as e:
+            print(f"Daily refresh failed for {summoner_name}: {e}")
+    return refreshed
+
+def save_leaderboard_data():
+    payload = {
+        "player_stats": player_stats,
+        "tracked_players": list(tracked_players),
+    }
+    with open(LEADERBOARD_DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+def load_leaderboard_data():
+    global player_stats, tracked_players
+    if not os.path.exists(LEADERBOARD_DATA_FILE):
+        return
+    try:
+        with open(LEADERBOARD_DATA_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        player_stats = payload.get("player_stats", {})
+        tracked_players = set(payload.get("tracked_players", []))
+    except Exception as e:
+        print(f"Failed to load leaderboard data: {e}")
+
+@tasks.loop(hours=24)
+async def daily_leaderboard_refresh():
+    refreshed = await refresh_all_tracked_players()
+    if refreshed > 0:
+        save_leaderboard_data()
+    print(f"Daily leaderboard refresh complete. Refreshed: {refreshed}")
+
+@daily_leaderboard_refresh.before_loop
+async def before_daily_refresh():
+    await bot.wait_until_ready()
 
 keep_alive()
 bot.run(TOKEN)
