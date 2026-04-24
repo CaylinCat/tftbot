@@ -99,7 +99,8 @@ async def weston(ctx):
 @bot.command(name='tft')
 async def tft(ctx, *, summoner_name):
     try:
-        profile_data = scrape_tft_profile(summoner_name)
+        normalized_name = normalize_riot_id(summoner_name)
+        profile_data = scrape_tft_profile(normalized_name)
         if not profile_data:
             await ctx.send(f"Could not retrieve valid data for {summoner_name}. Please check the summoner name or region.")
             return
@@ -135,83 +136,108 @@ async def tft(ctx, *, summoner_name):
 
         await ctx.send(embed=embed)
 
-        upsert_player_stats(summoner_name, stats, rank_text, lp_text, tier_icon_url)
+        upsert_player_stats(normalized_name, stats, rank_text, lp_text, tier_icon_url)
         save_leaderboard_data()
 
     except Exception as e:
         await ctx.send(f"An error occurred while retrieving data for {summoner_name}: {e}")
 
 
+LEADERBOARD_STAT_MAPPING = {
+    "wins": "Wins",
+    "winrate": "Win Rate",
+    "top4s": "Top 4s",
+    "top4rate": "Top 4 Rate",
+    "games": "Games Played",
+    "avgrank": "Average Rank",
+    "rank": "Rank",
+}
+
+def sort_player_stats_for_stat(stat_slug: str):
+    stat_key = LEADERBOARD_STAT_MAPPING[stat_slug]
+    if stat_key == "Rank":
+        return sorted(
+            player_stats.items(),
+            key=lambda x: (
+                get_rank_value(x[1][stat_key]),
+                get_division_value(x[1][stat_key]),
+                get_lp_value(x[1][stat_key]),
+            ),
+            reverse=True
+        )
+    if stat_key == "Average Rank":
+        return sorted(player_stats.items(), key=lambda x: float(x[1][stat_key].replace("#", "").strip()), reverse=False)
+    if stat_key in ["Win Rate", "Top 4 Rate"]:
+        return sorted(player_stats.items(), key=lambda x: float(x[1][stat_key].replace("%", "").strip()), reverse=True)
+    return sorted(player_stats.items(), key=lambda x: int(x[1][stat_key].replace(",", "")), reverse=True)
+
+def build_leaderboard_embed(stat_slug: str):
+    stat_key = LEADERBOARD_STAT_MAPPING[stat_slug]
+    sorted_stats = sort_player_stats_for_stat(stat_slug)
+    cuteness = ["✨💖✨", "💕🌸💕", "🌟💗🌟", "🌈💝🌈", "🪄💓🪄"]
+    cutey = random.choice(cuteness)
+    embed = discord.Embed(
+        title=f"Leaderboard — {stat_key} {cutey}",
+        color=discord.Color.blurple()
+    )
+
+    lines = ["`#  Player              Value            Rank`"]
+    for i, (name, stats) in enumerate(sorted_stats[:20], start=1):
+        value = stats.get(stat_key, "-")
+        rank_display = stats.get("Rank", "-")
+        lines.append(f"`{i:<2} {name[:18]:<18} {str(value)[:15]:<15} {str(rank_display)[:18]:<18}`")
+    embed.description = "\n".join(lines)
+    embed.set_footer(text="Tap buttons to switch stat tabs")
+    return embed
+
+class LeaderboardView(View):
+    def __init__(self, initial_stat: str):
+        super().__init__(timeout=180)
+        self.current_stat = initial_stat
+
+    async def update(self, interaction: discord.Interaction, stat_slug: str):
+        self.current_stat = stat_slug
+        await interaction.response.edit_message(embed=build_leaderboard_embed(stat_slug), view=self)
+
+    @discord.ui.button(label="Wins", style=discord.ButtonStyle.primary, row=0)
+    async def wins_btn(self, interaction: discord.Interaction, button: Button):
+        await self.update(interaction, "wins")
+
+    @discord.ui.button(label="Win Rate", style=discord.ButtonStyle.success, row=0)
+    async def winrate_btn(self, interaction: discord.Interaction, button: Button):
+        await self.update(interaction, "winrate")
+
+    @discord.ui.button(label="Top 4s", style=discord.ButtonStyle.primary, row=0)
+    async def top4s_btn(self, interaction: discord.Interaction, button: Button):
+        await self.update(interaction, "top4s")
+
+    @discord.ui.button(label="Top 4 Rate", style=discord.ButtonStyle.success, row=0)
+    async def top4rate_btn(self, interaction: discord.Interaction, button: Button):
+        await self.update(interaction, "top4rate")
+
+    @discord.ui.button(label="Games", style=discord.ButtonStyle.secondary, row=0)
+    async def games_btn(self, interaction: discord.Interaction, button: Button):
+        await self.update(interaction, "games")
+
+    @discord.ui.button(label="Avg Rank", style=discord.ButtonStyle.secondary, row=1)
+    async def avgrank_btn(self, interaction: discord.Interaction, button: Button):
+        await self.update(interaction, "avgrank")
+
+    @discord.ui.button(label="Rank", style=discord.ButtonStyle.danger, row=1)
+    async def rank_btn(self, interaction: discord.Interaction, button: Button):
+        await self.update(interaction, "rank")
+
 @bot.command(name='leaderboard')
-async def leaderboard(ctx, stat: str):
-    valid_stats = ['wins', 'winrate', 'top4s', 'top4rate', 'games', 'avgrank', 'rank']  # Added 'rank' to valid stats
-
-    stat = stat.lower()
-
-    if stat not in valid_stats:
-        await ctx.send(f"Invalid stat. Choose from: {', '.join(valid_stats)}")
+async def leaderboard(ctx, stat: str = "rank"):
+    stat = stat.lower().strip()
+    if stat not in LEADERBOARD_STAT_MAPPING:
+        await ctx.send(f"Invalid stat. Choose from: {', '.join(LEADERBOARD_STAT_MAPPING.keys())}")
         return
-
-    # Map stat to key in player_stats
-    stat_mapping = {
-        'wins': 'Wins',
-        'winrate': 'Win Rate',
-        'top4s': 'Top 4s',
-        'top4rate': 'Top 4 Rate',
-        'games': 'Games Played',
-        'avgrank': 'Average Rank',
-        'rank': 'Rank'
-    }
-
-    stat_key = stat_mapping[stat]
-
     if not player_stats:
         await ctx.send("No stats available. Use `!tft <name>` to add some.")
         return
-
-    # Sort based on stat
-    if stat_key == 'Rank':
-        sorted_stats = sorted(player_stats.items(), key=lambda x: (get_rank_value(x[1][stat_key]), get_lp_value(x[1][stat_key])), reverse=True)
-    elif stat_key == 'Average Rank':
-        sorted_stats = sorted(player_stats.items(), key=lambda x: float(x[1][stat_key].replace('#', '').strip()), reverse=False)
-    elif stat_key in ['Win Rate', 'Top 4 Rate']:
-        sorted_stats = sorted(player_stats.items(), key=lambda x: float(x[1][stat_key].replace('%', '').strip()), reverse=True)
-    else:
-        sorted_stats = sorted(player_stats.items(), key=lambda x: int(x[1][stat_key].replace(",", "")), reverse=True)
-
-    # old
-    # embed = discord.Embed(
-    #     title=f"**Leaderboard - Sorted by {stat_key.capitalize()}**",
-    #     color=discord.Color.blue()  # You can change the color here if you'd like
-    # )
-
-    # for i, (name, stats) in enumerate(sorted_stats, start=1):
-    #     if stat_key == 'Rank':
-    #         rank_info = f"{stats[stat_key]}".strip()
-    #         embed.add_field(name=f"{i}. **{name}**", value=rank_info, inline=False)
-    #     else:
-    #         embed.add_field(name=f"{i}. **{name}**", value=stats[stat_key], inline=False)
-
-    # await ctx.send(embed=embed)
-
-    cuteness = [
-        "✨💖✨",
-        "💕🌸💕",
-        "🌟💗🌟",
-        "🌈💝🌈",
-        "🪄💓🪄"
-    ]
-    cutey = random.choice(cuteness)
-
-    leaderboard_msg = f"**Leaderboard - Sorted by {stat_key.capitalize()}** {cutey}\n"
-    for i, (name, stats) in enumerate(sorted_stats, start=1):
-        if stat_key == 'Rank':
-            rank_info = f"{stats[stat_key]}".strip()
-            leaderboard_msg += f"{i}. {name} - {rank_info}\n"
-        else:
-            leaderboard_msg += f"{i}. {name} - {stats[stat_key]}\n"
-
-    await ctx.send(leaderboard_msg)
+    view = LeaderboardView(stat)
+    await ctx.send(embed=build_leaderboard_embed(stat), view=view)
 
 def get_rank_value(rank_str):
     rank_order = {
@@ -234,6 +260,17 @@ def get_lp_value(rank_str):
         lp_value = rank_str.split()[-1].replace('LP', '').strip()
         return int(lp_value) if lp_value else 0
     except ValueError:
+        return 0
+
+def get_division_value(rank_str):
+    try:
+        parts = rank_str.split()
+        if len(parts) < 2:
+            return 0
+        division = parts[1].upper()
+        division_order = {"I": 4, "II": 3, "III": 2, "IV": 1}
+        return division_order.get(division, 0)
+    except Exception:
         return 0
 
 DEFAULT_TRAIT_MAP = {
@@ -714,6 +751,17 @@ def scrape_tft_profile(summoner_name: str):
         "tier_icon_url": tier_icon_url,
     }
 
+def normalize_riot_id(input_name: str) -> str:
+    cleaned = input_name.strip()
+    if "#" in cleaned:
+        # DAKGG endpoint expects gameName-tagLine.
+        game_name, tag_line = cleaned.split("#", 1)
+        game_name = game_name.strip()
+        tag_line = tag_line.strip()
+        if game_name and tag_line:
+            return f"{game_name}-{tag_line}"
+    return cleaned
+
 def upsert_player_stats(summoner_name: str, stats: dict, rank_text: str, lp_text: str, tier_icon_url: str = None):
     player_stats[summoner_name] = {
         "Wins": stats["Wins"],
@@ -875,7 +923,11 @@ def format_comp_reply(comp):
 def get_top_ranked_players(limit=3):
     return sorted(
         player_stats.items(),
-        key=lambda x: (get_rank_value(x[1]["Rank"]), get_lp_value(x[1]["Rank"])),
+        key=lambda x: (
+            get_rank_value(x[1]["Rank"]),
+            get_division_value(x[1]["Rank"]),
+            get_lp_value(x[1]["Rank"]),
+        ),
         reverse=True
     )[:limit]
 
