@@ -40,6 +40,11 @@ COMPS_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1QREhel46OklYQ3qeW
 comps_cache = []
 MENTALHELP_CONFIG = {}
 message_streak_state = {}
+VOCAB_WARNING_ROLE = "timeout"
+VOCAB_WARNING_COOLDOWN_SECONDS = 20 * 60
+VOCAB_WARNING_REPLY = "Stop! You are better than this. Fix your vocab."
+CHUD_WORD_PATTERN = re.compile(r"\bchud", re.IGNORECASE)
+vocab_warning_cooldowns = {}
 
 @bot.event
 async def on_ready():
@@ -56,6 +61,7 @@ async def on_message(message):
     if message.author == bot.user:
         return
     await maybe_send_mentalhelp_prompt(message)
+    await maybe_send_vocab_warning(message)
     if bot.user.mentioned_in(message):
         await message.channel.send("hi")
     await bot.process_commands(message)
@@ -866,6 +872,23 @@ async def maybe_send_mentalhelp_prompt(message):
         state["alerted"] = True
 
     message_streak_state[state_key] = state
+
+async def maybe_send_vocab_warning(message):
+    if not message.guild or not isinstance(message.author, discord.Member):
+        return
+    if not any(role.name.lower() == VOCAB_WARNING_ROLE for role in message.author.roles):
+        return
+    if not CHUD_WORD_PATTERN.search(message.content or ""):
+        return
+
+    now = datetime.now().timestamp()
+    cooldown_key = (message.guild.id, message.author.id)
+    last_sent = vocab_warning_cooldowns.get(cooldown_key)
+    if last_sent is not None and (now - last_sent) < VOCAB_WARNING_COOLDOWN_SECONDS:
+        return
+
+    await message.channel.send(VOCAB_WARNING_REPLY)
+    vocab_warning_cooldowns[cooldown_key] = now
 
 def refresh_comps_cache():
     global comps_cache
