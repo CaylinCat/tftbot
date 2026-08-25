@@ -44,7 +44,18 @@ VOCAB_WARNING_ROLE = "timeout"
 VOCAB_WARNING_COOLDOWN_SECONDS = 20 * 60
 VOCAB_WARNING_REPLY = "Stop! You are better than this. Fix your vocab."
 CHUD_WORD_PATTERN = re.compile(r"\bchud", re.IGNORECASE)
+SLOP_WORD_PATTERN = re.compile(r"\bslop", re.IGNORECASE)
+SLOP_WARNING_SUFFIX = "Stop describing all your food with slop."
+SLOP_WARNING_REPLIES = [
+    "That's not slop, that plate actually looks fire.",
+    "Slop? Be serious. That looks pretty good actually.",
+    "That's a real meal, not slop. It looks solid.",
+    "Hold on, that doesn't look like slop at all. Kinda appetizing ngl.",
+    "Not slop. That actually looks well put together.",
+    "That's food. Decent food. Stop slandering the plate.",
+]
 vocab_warning_cooldowns = {}
+slop_warning_last_dates = {}
 
 @bot.event
 async def on_ready():
@@ -62,6 +73,7 @@ async def on_message(message):
         return
     await maybe_send_mentalhelp_prompt(message)
     await maybe_send_vocab_warning(message)
+    await maybe_send_slop_warning(message)
     if bot.user.mentioned_in(message):
         await message.channel.send("hi")
     await bot.process_commands(message)
@@ -889,6 +901,23 @@ async def maybe_send_vocab_warning(message):
 
     await message.channel.send(VOCAB_WARNING_REPLY)
     vocab_warning_cooldowns[cooldown_key] = now
+
+async def maybe_send_slop_warning(message):
+    if not message.guild or not isinstance(message.author, discord.Member):
+        return
+    if not any(role.name.lower() == VOCAB_WARNING_ROLE for role in message.author.roles):
+        return
+    if not SLOP_WORD_PATTERN.search(message.content or ""):
+        return
+
+    today = datetime.now(PST_TIMEZONE).date().isoformat()
+    cooldown_key = (message.guild.id, message.author.id)
+    if slop_warning_last_dates.get(cooldown_key) == today:
+        return
+
+    reply = f"{random.choice(SLOP_WARNING_REPLIES)} {SLOP_WARNING_SUFFIX}"
+    await message.channel.send(reply)
+    slop_warning_last_dates[cooldown_key] = today
 
 def refresh_comps_cache():
     global comps_cache
