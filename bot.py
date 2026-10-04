@@ -45,6 +45,7 @@ VOCAB_WARNING_COOLDOWN_SECONDS = 20 * 60
 VOCAB_WARNING_REPLY = "Stop! You are better than this. Fix your vocab."
 CHUD_WORD_PATTERN = re.compile(r"\bchud", re.IGNORECASE)
 SLOP_WORD_PATTERN = re.compile(r"\bslop", re.IGNORECASE)
+SAYS_COMMAND_PATTERN = re.compile(r"(.+?)\s+says\s+(\S+)\s*$", re.IGNORECASE)
 SLOP_WARNING_SUFFIX = "Stop describing all your food with slop."
 SLOP_WARNING_REPLIES = [
     "That's not slop, that plate actually looks fire.",
@@ -100,8 +101,20 @@ async def on_message(message):
     await maybe_send_vocab_warning(message)
     await maybe_send_slop_warning(message)
     if bot.user.mentioned_in(message):
-        await message.channel.send("hi")
+        reply = parse_says_reply(message)
+        await message.channel.send(reply or "hi")
     await bot.process_commands(message)
+
+def parse_says_reply(message):
+    content = re.sub(rf"<@!?{bot.user.id}>", " ", message.content or "")
+    match = SAYS_COMMAND_PATTERN.match(content.strip())
+    if not match:
+        return None
+    text = re.sub(r"\s+", " ", match.group(1)).strip()
+    word = match.group(2).strip(".,!?;:\"'")
+    if not text or not word:
+        return None
+    return f"{text} dont say {word}!"
 
 @bot.command(name='loser')
 async def loser(ctx, member: discord.Member):
@@ -737,6 +750,7 @@ async def help(ctx):
         "🌈 **!delete <name>** - Deletes a player from the leaderboard.\n"
         "🧹 **!clear [amount]** - Deletes recent messages.\n"
         "⏰ **!remind <time> [timezone] [date] <message>** - Pings you at that time. Ex: `!remind 1:57PM tomorrow send out the form`\n"
+        "🗣️ **@bot <text> says <word>** - Replies `<text> dont say <word>!`.\n"
     )
     await ctx.send(help_message)
 
