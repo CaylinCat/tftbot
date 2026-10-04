@@ -13,11 +13,11 @@ import re
 from collections import defaultdict
 from urllib.parse import quote
 import json
-from datetime import datetime
+from datetime import datetime, timezone, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
-from datetime import time as dt_time
 import csv
 import io
+import uuid
 
 load_dotenv()
 
@@ -45,6 +45,7 @@ VOCAB_WARNING_COOLDOWN_SECONDS = 20 * 60
 VOCAB_WARNING_REPLY = "Stop! You are better than this. Fix your vocab."
 CHUD_WORD_PATTERN = re.compile(r"\bchud", re.IGNORECASE)
 SLOP_WORD_PATTERN = re.compile(r"\bslop", re.IGNORECASE)
+SAYS_COMMAND_PATTERN = re.compile(r"(.+?)\s+says\s+(\S+)\s*$", re.IGNORECASE)
 SLOP_WARNING_SUFFIX = "Stop describing all your food with slop."
 SLOP_WARNING_REPLIES = [
     "That's not slop, that plate actually looks fire.",
@@ -56,6 +57,29 @@ SLOP_WARNING_REPLIES = [
 ]
 vocab_warning_cooldowns = {}
 slop_warning_last_dates = {}
+reminders = []
+DEFAULT_REMINDER_TZ = "PST"
+REMINDER_TIMEZONES = {
+    "PST": "America/Los_Angeles",
+    "PDT": "America/Los_Angeles",
+    "EST": "America/New_York",
+    "EDT": "America/New_York",
+    "CST": "America/Chicago",
+    "CDT": "America/Chicago",
+    "MST": "America/Denver",
+    "MDT": "America/Denver",
+    "UTC": "UTC",
+    "GMT": "UTC",
+}
+REMIND_USAGE = (
+    "Usage: `!remind 1:57PM tomorrow send out the form` — "
+    "time is required (`1:57PM`); timezone (`PST`, `EST`, ...) and "
+    "date (`today`, `tomorrow`, `10/2/26`) are optional. Default timezone is PST."
+)
+TIME_WITH_MERIDIEM = re.compile(r"^(\d{1,2}):(\d{2})\s*(AM|PM)$", re.IGNORECASE)
+TIME_ONLY = re.compile(r"^(\d{1,2}):(\d{2})$")
+DATE_NUMERIC = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{2}|\d{4})$")
+MERIDIEM = re.compile(r"^(AM|PM)$", re.IGNORECASE)
 
 @bot.event
 async def on_ready():
@@ -65,6 +89,8 @@ async def on_ready():
         daily_leaderboard_refresh.start()
     if not daily_leaderboard_poster.is_running():
         daily_leaderboard_poster.start()
+    if not reminder_checker.is_running():
+        reminder_checker.start()
     print(f'Logged in as {bot.user}')
 
 @bot.event
@@ -75,8 +101,20 @@ async def on_message(message):
     await maybe_send_vocab_warning(message)
     await maybe_send_slop_warning(message)
     if bot.user.mentioned_in(message):
-        await message.channel.send("hi")
+        reply = parse_says_reply(message)
+        await message.channel.send(reply or "hi")
     await bot.process_commands(message)
+
+def parse_says_reply(message):
+    content = re.sub(rf"<@!?{bot.user.id}>", " ", message.content or "")
+    match = SAYS_COMMAND_PATTERN.match(content.strip())
+    if not match:
+        return None
+    text = re.sub(r"\s+", " ", match.group(1)).strip()
+    word = match.group(2).strip(".,!?;:\"'")
+    if not text or not word:
+        return None
+    return f"{text} dont say {word}!"
 
 @bot.command(name='loser')
 async def loser(ctx, member: discord.Member):
@@ -667,6 +705,36 @@ async def mentalhelp(ctx, channel_name: str, mode: str):
 
     await ctx.send("Use `!mentalhelp <channel_name> on` or `!mentalhelp <channel_name> off`.")
 
+@bot.command(name='remind')
+async def remind(ctx, *, reminder_text: str = ""):
+    reminder_text = reminder_text.strip()
+    if not reminder_text:
+        await ctx.send(REMIND_USAGE)
+        return
+
+    try:
+        parsed = parse_reminder(reminder_text)
+    except ValueError as e:
+        await ctx.send(f"{e}\n{REMIND_USAGE}")
+        return
+
+    reminders.append({
+        "id": str(uuid.uuid4()),
+        "user_id": ctx.author.id,
+        "channel_id": ctx.channel.id,
+        "guild_id": ctx.guild.id if ctx.guild else None,
+        "message": parsed["message"],
+        "due_at": parsed["due_utc"].isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    save_leaderboard_data()
+
+    unix = int(parsed["due_utc"].timestamp())
+    await ctx.send(
+        f"Got it. I'll ping you <t:{unix}:F> (<t:{unix}:R>)\n"
+        f"Message: {parsed['message']}"
+    )
+
 @bot.command(name='help')
 async def help(ctx):
     help_message = (
@@ -681,6 +749,8 @@ async def help(ctx):
         "🌸 **!weston** - Cause he DID get me to emerald but also called me vanessa so HMMM.\n"
         "🌈 **!delete <name>** - Deletes a player from the leaderboard.\n"
         "🧹 **!clear [amount]** - Deletes recent messages.\n"
+        "⏰ **!remind <time> [timezone] [date] <message>** - Pings you at that time. Ex: `!remind 1:57PM tomorrow send out the form`\n"
+        "🗣️ **@bot <text> says <word>** - Replies `<text> dont say <word>!`.\n"
     )
     await ctx.send(help_message)
 
@@ -812,18 +882,132 @@ async def refresh_all_tracked_players():
             print(f"Daily refresh failed for {summoner_name}: {e}")
     return refreshed
 
+class ReminderParseError(ValueError):
+    pass
+
+def _try_take_time(tokens, index):
+    if index >= len(tokens):
+        return None, index
+    match = TIME_WITH_MERIDIEM.match(tokens[index])
+    if match:
+        return (int(match.group(1)), int(match.group(2)), match.group(3).upper()), index + 1
+    if TIME_ONLY.match(tokens[index]) and index + 1 < len(tokens) and MERIDIEM.match(tokens[index + 1]):
+        match = TIME_ONLY.match(tokens[index])
+        return (int(match.group(1)), int(match.group(2)), tokens[index + 1].upper()), index + 2
+    return None, index
+
+def _hour24(hour, meridiem):
+    if hour < 1 or hour > 12:
+        raise ReminderParseError("That time looks invalid. Use something like `1:57PM`.")
+    if meridiem == "AM":
+        return 0 if hour == 12 else hour
+    return hour if hour == 12 else hour + 12
+
+def _parse_date_token(date_token, now_local):
+    if date_token is None or date_token == "today":
+        return now_local.date()
+    if date_token == "tomorrow":
+        return now_local.date() + timedelta(days=1)
+    match = DATE_NUMERIC.match(date_token)
+    if not match:
+        raise ReminderParseError("That date looks invalid. Use `today`, `tomorrow`, or `10/2/26`.")
+    month, day, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    if year < 100:
+        year += 2000
+    try:
+        return datetime(year, month, day).date()
+    except ValueError:
+        raise ReminderParseError("That date looks invalid. Use `today`, `tomorrow`, or `10/2/26`.")
+
+def parse_reminder(text, now_utc=None):
+    tokens = text.split()
+    if not tokens:
+        raise ReminderParseError("I need a time and a message.")
+
+    hour = None
+    minute = None
+    meridiem = None
+    date_token = None
+    tz_key = None
+    index = 0
+
+    while index < len(tokens):
+        if hour is None:
+            parsed_time, new_index = _try_take_time(tokens, index)
+            if parsed_time:
+                hour, minute, meridiem = parsed_time
+                index = new_index
+                continue
+        upper = tokens[index].upper()
+        if date_token is None and (upper in ("TODAY", "TOMORROW") or DATE_NUMERIC.match(tokens[index])):
+            date_token = tokens[index] if DATE_NUMERIC.match(tokens[index]) else upper.lower()
+            index += 1
+            continue
+        if tz_key is None and upper in REMINDER_TIMEZONES:
+            tz_key = upper
+            index += 1
+            continue
+        break
+
+    if hour is None:
+        raise ReminderParseError("I need a time like `1:57PM`.")
+    if minute < 0 or minute > 59:
+        raise ReminderParseError("That time looks invalid. Use something like `1:57PM`.")
+
+    message = " ".join(tokens[index:]).strip()
+    if not message:
+        raise ReminderParseError("I need a message to remind you about.")
+
+    tz_key = tz_key or DEFAULT_REMINDER_TZ
+    tzinfo = ZoneInfo(REMINDER_TIMEZONES[tz_key])
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone(tzinfo)
+    target_date = _parse_date_token(date_token, now_local)
+    hour_24 = _hour24(hour, meridiem)
+
+    try:
+        due_local = datetime(
+            target_date.year,
+            target_date.month,
+            target_date.day,
+            hour_24,
+            minute,
+            tzinfo=tzinfo,
+        )
+    except ValueError:
+        raise ReminderParseError("That date and time combination isn't valid.")
+
+    due_utc = due_local.astimezone(timezone.utc)
+    if due_utc <= now_utc:
+        raise ReminderParseError("That time already passed. Pick a future time.")
+
+    return {
+        "due_utc": due_utc,
+        "due_local": due_local,
+        "tz_key": tz_key,
+        "message": message,
+    }
+
+def reminder_due_at(reminder):
+    due_at = datetime.fromisoformat(reminder["due_at"])
+    if due_at.tzinfo is None:
+        due_at = due_at.replace(tzinfo=timezone.utc)
+    return due_at
+
 def save_leaderboard_data():
     payload = {
         "player_stats": player_stats,
         "tracked_players": list(tracked_players),
         "daily_leaderboard_config": DAILY_LEADERBOARD_CONFIG,
         "mentalhelp_config": MENTALHELP_CONFIG,
+        "reminders": reminders,
     }
     with open(LEADERBOARD_DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
 def load_leaderboard_data():
-    global player_stats, tracked_players, DAILY_LEADERBOARD_CONFIG, MENTALHELP_CONFIG
+    global player_stats, tracked_players, DAILY_LEADERBOARD_CONFIG, MENTALHELP_CONFIG, reminders
     if not os.path.exists(LEADERBOARD_DATA_FILE):
         return
     try:
@@ -833,6 +1017,8 @@ def load_leaderboard_data():
         tracked_players = set(payload.get("tracked_players", []))
         DAILY_LEADERBOARD_CONFIG = payload.get("daily_leaderboard_config", {})
         MENTALHELP_CONFIG = payload.get("mentalhelp_config", {})
+        loaded_reminders = payload.get("reminders", [])
+        reminders = loaded_reminders if isinstance(loaded_reminders, list) else []
     except Exception as e:
         print(f"Failed to load leaderboard data: {e}")
 
@@ -1052,6 +1238,47 @@ async def daily_leaderboard_poster():
 
 @daily_leaderboard_poster.before_loop
 async def before_daily_leaderboard_poster():
+    await bot.wait_until_ready()
+
+@tasks.loop(seconds=20)
+async def reminder_checker():
+    if not reminders:
+        return
+
+    now = datetime.now(timezone.utc)
+    due = []
+    remaining = []
+    for reminder in reminders:
+        try:
+            if reminder_due_at(reminder) <= now:
+                due.append(reminder)
+            else:
+                remaining.append(reminder)
+        except Exception as e:
+            print(f"Dropping malformed reminder {reminder}: {e}")
+
+    if not due and len(remaining) == len(reminders):
+        return
+
+    reminders[:] = remaining
+    save_leaderboard_data()
+
+    for reminder in due:
+        channel = bot.get_channel(reminder.get("channel_id"))
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(reminder["channel_id"])
+            except Exception as e:
+                print(f"Failed to fetch reminder channel {reminder.get('channel_id')}: {e}")
+                continue
+        mention = f"<@{reminder['user_id']}>"
+        try:
+            await channel.send(f"{mention} {reminder['message']}")
+        except Exception as e:
+            print(f"Failed sending reminder {reminder.get('id')}: {e}")
+
+@reminder_checker.before_loop
+async def before_reminder_checker():
     await bot.wait_until_ready()
 
 keep_alive()
