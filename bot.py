@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 from datetime import time as dt_time
 import csv
 import io
+import custom_responses
 
 load_dotenv()
 
@@ -27,6 +28,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
+custom_responses.register(bot)
 
 player_stats = {}
 browser = None
@@ -44,6 +46,8 @@ message_streak_state = {}
 @bot.event
 async def on_ready():
     load_leaderboard_data()
+    custom_responses.load_custom_responses()
+    custom_responses.add_persistent_view(bot)
     refresh_comps_cache()
     if not daily_leaderboard_refresh.is_running():
         daily_leaderboard_refresh.start()
@@ -55,6 +59,9 @@ async def on_ready():
 async def on_message(message):
     if message.author == bot.user:
         return
+    if custom_responses.is_wizard_user(message.author.id):
+        return
+    await custom_responses.maybe_reply_to_trigger(message)
     await maybe_send_mentalhelp_prompt(message)
     if bot.user.mentioned_in(message):
         await message.channel.send("hi")
@@ -663,6 +670,8 @@ async def help(ctx):
         "🌸 **!weston** - Cause he DID get me to emerald but also called me vanessa so HMMM.\n"
         "🌈 **!delete <name>** - Deletes a player from the leaderboard.\n"
         "🧹 **!clear [amount]** - Deletes recent messages.\n"
+        "💬 **!create response [amount]** - Save trigger words and the reply the timeout role gets. Amount defaults to 1, max 10. Then it asks if a longer word should count.\n"
+        "📋 **!responses** - List, edit, or delete saved responses. `!responses role @Role` sets the timeout role.\n"
     )
     await ctx.send(help_message)
 
