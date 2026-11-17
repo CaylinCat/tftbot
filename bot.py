@@ -670,7 +670,7 @@ async def help(ctx):
         "🌸 **!weston** - Cause he DID get me to emerald but also called me vanessa so HMMM.\n"
         "🌈 **!delete <name>** - Deletes a player from the leaderboard.\n"
         "🧹 **!clear [amount]** - Deletes recent messages.\n"
-        "💬 **!create response [amount]** - Save trigger words and the reply the timeout role gets. Amount defaults to 1, max 10. Then it asks if a longer word should count.\n"
+        "💬 **!create response [amount]** - Save trigger words and the reply the timeout role gets. Dev role only. Amount defaults to 1, max 10. Then it asks if a longer word should count.\n"
         "📋 **!responses** - List, edit, or delete saved responses. `!responses role @Role` sets the timeout role.\n"
     )
     await ctx.send(help_message)

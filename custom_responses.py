@@ -208,6 +208,11 @@ def is_wizard_user(user_id):
     return user_id in wizard_users
 
 
+def member_has_role(member, role_name):
+    target = role_name.casefold()
+    return any(getattr(role, "name", "").casefold() == target for role in getattr(member, "roles", ()))
+
+
 def can_modify(member, entry):
     permissions = getattr(member, "guild_permissions", None)
     if permissions is not None and permissions.manage_messages:
@@ -666,6 +671,9 @@ def register(bot):
 
     @bot.command(name="create")
     async def create(ctx, kind: str = None, count: str = "1"):
+        if not member_has_role(ctx.author, "dev"):
+            await ctx.send("You need the dev role to use this.")
+            return
         if (kind or "").casefold() != "response":
             await ctx.send("Use `!create response` or `!create response 2`.")
             return
