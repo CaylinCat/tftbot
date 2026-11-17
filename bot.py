@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 import csv
 import io
 import uuid
+import custom_responses
 
 load_dotenv()
 
@@ -27,6 +28,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
+custom_responses.register(bot)
 
 player_stats = {}
 browser = None
@@ -84,6 +86,8 @@ MERIDIEM = re.compile(r"^(AM|PM)$", re.IGNORECASE)
 @bot.event
 async def on_ready():
     load_leaderboard_data()
+    custom_responses.load_custom_responses()
+    custom_responses.add_persistent_view(bot)
     refresh_comps_cache()
     if not daily_leaderboard_refresh.is_running():
         daily_leaderboard_refresh.start()
@@ -97,6 +101,9 @@ async def on_ready():
 async def on_message(message):
     if message.author == bot.user:
         return
+    if custom_responses.is_wizard_user(message.author.id):
+        return
+    await custom_responses.maybe_reply_to_trigger(message)
     await maybe_send_mentalhelp_prompt(message)
     await maybe_send_vocab_warning(message)
     await maybe_send_slop_warning(message)
@@ -751,6 +758,8 @@ async def help(ctx):
         "🧹 **!clear [amount]** - Deletes recent messages.\n"
         "⏰ **!remind <time> [timezone] [date] <message>** - Pings you at that time. Ex: `!remind 1:57PM tomorrow send out the form`\n"
         "🗣️ **@bot <text> says <word>** - Replies `<text> dont say <word>!`.\n"
+        "💬 **!create response [amount]** - Save trigger words and the reply the timeout role gets. Dev role only. Amount defaults to 1, max 10. Then it asks if a longer word should count.\n"
+        "📋 **!responses** - List, edit, or delete saved responses. `!responses role @Role` sets the timeout role.\n"
     )
     await ctx.send(help_message)
 
